@@ -1,0 +1,74 @@
+version: 2
+
+sources:
+  - name: raw_movies
+    description: >
+      Raw data ingested via Airbyte and batch loaders into Google BigQuery.
+      Contains the MovieLens dataset (movies, ratings) and TMDB Weekly Trending Movie API data.
+    database: "{{ env_var('BIGQUERY_PROJECT', 'your_gcp_project_id') }}"
+    schema: "{{ env_var('BIGQUERY_DATASET_RAW', 'raw_movies') }}"
+    tables:
+      - name: movies
+        description: >
+          Raw MovieLens movies dataset containing movie titles with release years
+          and pipe-separated genres.
+        columns:
+          - name: movieId
+            description: Unique MovieLens movie identifier.
+            tests:
+              - not_null
+          - name: title
+            description: Movie title including release year in parentheses, e.g., 'Toy Story (1995)'.
+            tests:
+              - not_null
+          - name: genres
+            description: Pipe-separated list of movie genres, e.g., 'Adventure|Animation|Children|Comedy|Fantasy'.
+
+      - name: ratings
+        description: >
+          Raw MovieLens ratings dataset containing user rating submissions
+          and epoch timestamps.
+        columns:
+          - name: userId
+            description: Unique user identifier.
+            tests:
+              - not_null
+          - name: movieId
+            description: Movie identifier corresponding to raw_movies.movies.
+            tests:
+              - not_null
+          - name: rating
+            description: User rating score on a 0.5 to 5.0 scale in 0.5 increments.
+            tests:
+              - not_null
+          - name: timestamp
+            description: Unix epoch timestamp in seconds when the rating was submitted.
+            tests:
+              - not_null
+
+      - name: tmdb_trending
+        description: >
+          Raw weekly trending movies extracted from The Movie Database (TMDB)
+          REST API endpoint (/trending/movie/week) via Airbyte.
+        columns:
+          - name: id
+            description: Unique TMDB movie identifier.
+            tests:
+              - not_null
+          - name: title
+            description: TMDB official release title.
+          - name: overview
+            description: Plot synopsis / description.
+          - name: popularity
+            description: Relative popularity score calculated by TMDB.
+          - name: vote_average
+            description: Average user rating on TMDB (0.0 to 10.0 scale).
+          - name: vote_count
+            description: Total vote count on TMDB.
+          - name: release_date
+            description: Theatrical or digital release date string (YYYY-MM-DD).
+          - name: budget
+            description: Production budget in USD.
+          - name: revenue
+            description: Worldwide box office gross revenue in USD.
+

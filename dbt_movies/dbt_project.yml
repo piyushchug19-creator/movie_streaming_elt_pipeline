@@ -1,0 +1,36 @@
+name: 'dbt_movies'
+version: '1.0.0'
+config-version: 2
+
+# Profile name matching profiles.yml
+profile: 'dbt_movies'
+
+# Directory paths
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+# Global model configurations
+models:
+  dbt_movies:
+    # Staging models materialized as views for cost-efficiency and freshness
+    staging:
+      +materialized: view
+      +tags: ["staging", "daily"]
+
+    # Production marts materialized as BigQuery tables for high query performance in BI
+    marts:
+      +materialized: table
+      +tags: ["marts", "analytics", "bi"]
+
+vars:
+  # Bayesian weighted rating minimum vote threshold (m)
+  bayesian_min_votes: 25.0
+

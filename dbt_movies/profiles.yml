@@ -1,0 +1,26 @@
+dbt_movies:
+  target: dev
+  outputs:
+    dev:
+      type: bigquery
+      method: service-account
+      project: "{{ env_var('BIGQUERY_PROJECT', 'your_gcp_project_id') }}"
+      dataset: "{{ env_var('BIGQUERY_DATASET_ANALYTICS', 'analytics_movies') }}"
+      threads: 4
+      keyfile: "{{ env_var('GOOGLE_APPLICATION_CREDENTIALS', 'service_account.json') }}"
+      location: "{{ env_var('BIGQUERY_LOCATION', 'US') }}"
+      timeout_seconds: 300
+      priority: interactive
+      retries: 2
+    prod:
+      type: bigquery
+      method: service-account
+      project: "{{ env_var('BIGQUERY_PROJECT') }}"
+      dataset: "{{ env_var('BIGQUERY_DATASET_ANALYTICS', 'analytics_movies') }}"
+      threads: 8
+      keyfile: "{{ env_var('GOOGLE_APPLICATION_CREDENTIALS') }}"
+      location: "{{ env_var('BIGQUERY_LOCATION', 'US') }}"
+      timeout_seconds: 300
+      priority: batch
+      retries: 3
+
