@@ -95,7 +95,4 @@ SELECT
     profitability_rate,
     CURRENT_TIMESTAMP() AS mart_created_at
 FROM aggregated
-ORDER BY 
-    genre ASC, 
-    decade ASC
 

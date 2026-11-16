@@ -6,9 +6,11 @@ Interrogates the 'analytics_movies' dataset and visualizes movie performance met
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
+import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -18,9 +20,22 @@ import plotly.graph_objects as go
 import streamlit as st
 from dotenv import load_dotenv
 
-# LangChain & Gemini imports
+# LangChain & Gemini imports (kept for Ollama support)
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
+
+# Google GenAI (new SDK — supports AQ. format keys)
+try:
+    from google import genai as google_genai
+    _GENAI_AVAILABLE = True
+except ImportError:
+    _GENAI_AVAILABLE = False
+
+# Fallback to old LangChain Gemini if new SDK not available
+try:
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    _LANGCHAIN_GENAI_AVAILABLE = True
+except ImportError:
+    _LANGCHAIN_GENAI_AVAILABLE = False
 
 # BigQuery & SQLAlchemy
 from google.cloud import bigquery
@@ -138,13 +153,70 @@ Your task is to convert natural language business questions into precise, produc
 
 STRICT SQL RULES:
 1. Always generate valid Google BigQuery Standard SQL.
-2. Fully qualify all tables with the exact project and dataset: `{{project}}.{DEFAULT_DATASET}.<table_name>`.
-3. Read-Only Guardrail: ONLY generate `SELECT` queries. NEVER generate `DROP`, `DELETE`, `INSERT`, `UPDATE`, `ALTER`, `TRUNCATE`, `CREATE`, or procedural scripting blocks.
-4. For text searches or genre matching, use case-insensitive checks (e.g., `LOWER(primary_genre) = 'sci-fi'` or `'Sci-Fi' IN UNNEST(genre_array)` or `LOWER(clean_title) LIKE '%star wars%'`).
-5. Include a sensible `LIMIT` clause (e.g., `LIMIT 15` or `LIMIT 50`) unless the user is asking for aggregate summary across all records.
-6. When sorting by ratings, consider whether the question asks for `bayesian_weighted_score` or `avg_rating` with a minimum rating volume threshold (e.g., `rating_count >= 100`).
-7. Format numerical metrics cleanly using `ROUND(..., 2)`.
-8. Enclose your final SQL query inside a single ```sql ... ``` markdown code block. Do NOT include extraneous conversational filler before the SQL block.
+2. Fully qualify all tables: `{{project}}.{DEFAULT_DATASET}.mart_movie_performance` or `{{project}}.{DEFAULT_DATASET}.mart_genre_trends`.
+3. ONLY generate `SELECT` queries.
+4. In `mart_movie_performance`: To match genre (e.g. Sci-Fi), check `(LOWER(primary_genre) = 'sci-fi' OR LOWER(raw_genres) LIKE '%sci-fi%')`.
+5. In `mart_genre_trends`: 
+   - Column for ROI is `avg_return_on_investment` (do NOT use return_on_investment).
+   - If you SELECT `decade_label`, you MUST include `decade_label` in `GROUP BY decade, decade_label`.
+6. Enclose your final SQL query inside a single ```sql ... ``` markdown code block.
+
+FEW-SHOT EXAMPLES:
+Question: What are the top 5 highest-rated Sci-Fi movies with at least 100 ratings?
+```sql
+SELECT clean_title, release_year, primary_genre, avg_rating, rating_count, bayesian_weighted_score
+FROM `{{project}}.{DEFAULT_DATASET}.mart_movie_performance`
+WHERE (LOWER(primary_genre) = 'sci-fi' OR LOWER(raw_genres) LIKE '%sci-fi%') AND rating_count >= 100
+ORDER BY avg_rating DESC
+LIMIT 5
+```
+
+Question: Show the top 10 movies by Bayesian weighted rating score with their release year and ratings.
+```sql
+SELECT clean_title, release_year, primary_genre, avg_rating, rating_count, bayesian_weighted_score
+FROM `{{project}}.{DEFAULT_DATASET}.mart_movie_performance`
+WHERE rating_count >= 25
+ORDER BY bayesian_weighted_score DESC
+LIMIT 10
+```
+
+Question: Show the budget, revenue, and ROI for the top 10 most popular movies with known financials.
+```sql
+SELECT clean_title, release_year, budget, revenue, return_on_investment, popularity
+FROM `{{project}}.{DEFAULT_DATASET}.mart_movie_performance`
+WHERE budget IS NOT NULL AND revenue IS NOT NULL
+ORDER BY popularity DESC
+LIMIT 10
+```
+
+Question: Compare average ROI and total revenue across genres in the 2010s decade.
+```sql
+SELECT genre, decade_label, avg_return_on_investment, total_revenue, total_movies
+FROM `{{project}}.{DEFAULT_DATASET}.mart_genre_trends`
+WHERE decade = 2010
+ORDER BY total_revenue DESC
+LIMIT 15
+```
+
+Question: Show the average movie rating and total movies produced across decades since 1970.
+```sql
+SELECT decade_label, ROUND(AVG(avg_movie_rating), 2) AS avg_movie_rating, SUM(total_movies) AS total_movies
+FROM `{{project}}.{DEFAULT_DATASET}.mart_genre_trends`
+WHERE decade >= 1970
+GROUP BY decade, decade_label
+ORDER BY decade ASC
+LIMIT 15
+```
+
+Question: Which genres have the highest profitability rate with at least 50 movies in the catalog?
+```sql
+SELECT genre, ROUND(AVG(profitability_rate), 4) AS profitability_rate, SUM(total_movies) AS total_movies
+FROM `{{project}}.{DEFAULT_DATASET}.mart_genre_trends`
+GROUP BY genre
+HAVING SUM(total_movies) >= 50
+ORDER BY profitability_rate DESC
+LIMIT 10
+```
 """
 
 # ---------------------------------------------------------------------------
@@ -160,6 +232,39 @@ def get_bigquery_client(project: str, location: str) -> Optional[bigquery.Client
     except Exception as e:
         st.sidebar.error(f"BigQuery Client Initialization Error: {e}")
         return None
+
+def fix_common_sql_mistakes(sql: str) -> str:
+    """Auto-corrects common small-LLM BigQuery SQL mistakes."""
+    if not sql:
+        return sql
+    
+    # 1. In mart_genre_trends: fix return_on_investment -> avg_return_on_investment
+    if "mart_genre_trends" in sql:
+        sql = re.sub(r"\bAVG\s*\(\s*return_on_investment\s*\)", "avg_return_on_investment", sql, flags=re.IGNORECASE)
+        sql = re.sub(r"(?<!avg_)\breturn_on_investment\b", "avg_return_on_investment", sql, flags=re.IGNORECASE)
+        
+        # 2. Fix GROUP BY decade when decade_label is in SELECT
+        if "decade_label" in sql and "GROUP BY" in sql:
+            parts = sql.split("GROUP BY")
+            if len(parts) > 1 and "decade_label" not in parts[1]:
+                sql = re.sub(r"GROUP BY\s+decade\b", "GROUP BY decade, decade_label", sql, flags=re.IGNORECASE)
+            
+    # 3. In mart_movie_performance: expand primary_genre check to also check raw_genres
+    # MovieLens movies often have Action as primary and Sci-Fi as secondary
+    if "mart_movie_performance" in sql and "sci-fi" in sql.lower():
+        if "raw_genres" not in sql:
+            sql = re.sub(
+                r"LOWER\s*\(\s*primary_genre\s*\)\s*=\s*'sci-fi'",
+                "(LOWER(primary_genre) = 'sci-fi' OR LOWER(raw_genres) LIKE '%sci-fi%')",
+                sql,
+                flags=re.IGNORECASE
+            )
+            sql = re.sub(
+                r"primary_genre\s*=\s*'Sci-Fi'",
+                "(primary_genre = 'Sci-Fi' OR raw_genres LIKE '%Sci-Fi%')",
+                sql
+            )
+    return sql
 
 def execute_bigquery_query(client: bigquery.Client, query: str) -> Tuple[Optional[pd.DataFrame], float, Optional[str]]:
     """Executes a SQL query on BigQuery and returns the dataframe and latency."""
@@ -180,35 +285,34 @@ def execute_bigquery_query(client: bigquery.Client, query: str) -> Tuple[Optiona
         elapsed = time.time() - start_time
         return None, elapsed, str(e)
 
-def generate_sql_with_gemini(
+def generate_sql_with_ollama(
     user_query: str,
     project_id: str,
     dataset: str,
-    gemini_key: str,
-    model_name: str = "gemini-1.5-flash",
+    model_name: str = "llama3.2:3b",
+    ollama_url: str = "http://localhost:11434",
 ) -> Tuple[str, str]:
-    """Generates BigQuery Standard SQL using Google Gemini via LangChain."""
-    if not gemini_key:
-        return "", "GEMINI_API_KEY is not set. Please provide it in the sidebar or .env file."
-
+    """Generates BigQuery Standard SQL using local Ollama model."""
     try:
-        llm = ChatGoogleGenerativeAI(
-            model=model_name,
-            google_api_key=gemini_key,
-            temperature=0.0,
-            max_output_tokens=1024,
-        )
-
         formatted_system_prompt = SYSTEM_PROMPT_TEMPLATE.replace("{project}", project_id)
-        messages = [
-            SystemMessage(content=formatted_system_prompt),
-            HumanMessage(content=f"Question: {user_query}\nGenerate BigQuery SQL:"),
-        ]
+        payload = {
+            "model": model_name,
+            "messages": [
+                {"role": "system", "content": formatted_system_prompt},
+                {"role": "user", "content": f"Question: {user_query}\nGenerate BigQuery SQL:"}
+            ],
+            "stream": False,
+            "options": {"temperature": 0.0}
+        }
+        req = urllib.request.Request(
+            f"{ollama_url.rstrip('/')}/api/chat",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read().decode())
+            content = data.get("message", {}).get("content", "")
 
-        response = llm.invoke(messages)
-        content = response.content
-
-        # Extract SQL from markdown code block
         sql_match = re.search(r"```(?:sql)?\s*([\s\S]*?)\s*```", content, re.IGNORECASE)
         if sql_match:
             generated_sql = sql_match.group(1).strip()
@@ -217,26 +321,18 @@ def generate_sql_with_gemini(
 
         return generated_sql, ""
     except Exception as e:
-        return "", f"Gemini SQL Generation Error: {str(e)}"
+        return "", f"Ollama Error: {str(e)}. Make sure Ollama is running (`ollama serve`)."
 
-def generate_insights_with_gemini(
+def generate_insights_with_ollama(
     user_query: str,
     df: pd.DataFrame,
-    gemini_key: str,
-    model_name: str = "gemini-1.5-flash",
+    model_name: str = "llama3.2:3b",
+    ollama_url: str = "http://localhost:11434",
 ) -> str:
-    """Generates a brief 2-3 bullet point business insight from the query result."""
-    if not gemini_key or df is None or df.empty:
+    """Generates business insights using local Ollama model."""
+    if df is None or df.empty:
         return ""
-
     try:
-        llm = ChatGoogleGenerativeAI(
-            model=model_name,
-            google_api_key=gemini_key,
-            temperature=0.2,
-            max_output_tokens=512,
-        )
-
         sample_data = df.head(10).to_markdown(index=False)
         prompt = (
             f"User asked: '{user_query}'\n\n"
@@ -244,11 +340,138 @@ def generate_insights_with_gemini(
             "Provide 2 or 3 concise, executive-level key takeaways or findings based strictly on this data. "
             "Use bullet points with emojis."
         )
-
-        response = llm.invoke([HumanMessage(content=prompt)])
-        return response.content.strip()
+        payload = {
+            "model": model_name,
+            "messages": [
+                {"role": "user", "content": prompt}
+            ],
+            "stream": False,
+            "options": {"temperature": 0.2}
+        }
+        req = urllib.request.Request(
+            f"{ollama_url.rstrip('/')}/api/chat",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read().decode())
+            return data.get("message", {}).get("content", "").strip()
     except Exception:
         return ""
+
+def generate_sql_with_gemini(
+    user_query: str,
+    project_id: str,
+    dataset: str,
+    gemini_key: str,
+    model_name: str = "gemini-3.8-flash",
+) -> Tuple[str, str]:
+    """Generates BigQuery Standard SQL using Google Gemini (new google-genai SDK first, LangChain fallback)."""
+    if not gemini_key:
+        return "", "GEMINI_API_KEY is not set. Please provide it in the sidebar or .env file."
+
+    formatted_system_prompt = SYSTEM_PROMPT_TEMPLATE.replace("{project}", project_id)
+    full_prompt = (
+        formatted_system_prompt
+        + f"\n\nQuestion: {user_query}\nGenerate BigQuery SQL:"
+    )
+
+    clean_model = model_name.strip()
+    if clean_model.startswith("models/"):
+        clean_model = clean_model[7:]
+
+    # --- Try new google-genai SDK first (supports AQ. format keys) ---
+    if _GENAI_AVAILABLE:
+        try:
+            client = google_genai.Client(api_key=gemini_key)
+            response = client.models.generate_content(
+                model=clean_model,
+                contents=full_prompt,
+            )
+            content = response.text or ""
+            sql_match = re.search(r"```(?:sql)?\s*([\s\S]*?)\s*```", content, re.IGNORECASE)
+            generated_sql = sql_match.group(1).strip() if sql_match else content.strip()
+            if generated_sql:
+                return generated_sql, ""
+        except Exception as e:
+            err_str = str(e)
+            # If it's a model not found / auth error, return immediately instead of hanging in retries
+            if any(k in err_str.lower() for k in ["404", "not found", "403", "permission", "invalid"]):
+                return "", f"Gemini API Error ({clean_model}): {err_str}"
+
+    # --- Fallback: LangChain google-genai (with max_retries=1 to prevent freezing) ---
+    if _LANGCHAIN_GENAI_AVAILABLE:
+        try:
+            from langchain_google_genai import ChatGoogleGenerativeAI
+            llm = ChatGoogleGenerativeAI(
+                model=clean_model,
+                google_api_key=gemini_key,
+                temperature=0.0,
+                max_output_tokens=1024,
+                max_retries=1,
+                request_timeout=20,
+            )
+            messages = [
+                SystemMessage(content=formatted_system_prompt),
+                HumanMessage(content=f"Question: {user_query}\nGenerate BigQuery SQL:"),
+            ]
+            response = llm.invoke(messages)
+            content = response.content
+            sql_match = re.search(r"```(?:sql)?\s*([\s\S]*?)\s*```", content, re.IGNORECASE)
+            generated_sql = sql_match.group(1).strip() if sql_match else content.strip()
+            return generated_sql, ""
+        except Exception as e:
+            return "", f"Gemini SQL Generation Error: {str(e)}"
+
+    return "", "No Gemini SDK available. Run: pip install google-genai"
+
+def generate_insights_with_gemini(
+    user_query: str,
+    df: pd.DataFrame,
+    gemini_key: str,
+    model_name: str = "gemini-3.8-flash",
+) -> str:
+    """Generates business insights using Google Gemini."""
+    if not gemini_key or df is None or df.empty:
+        return ""
+
+    sample_data = df.head(10).to_markdown(index=False)
+    prompt = (
+        f"User asked: '{user_query}'\n\n"
+        f"Here is the top data returned from BigQuery:\n{sample_data}\n\n"
+        "Provide 2 or 3 concise, executive-level key takeaways or findings based strictly on this data. "
+        "Use bullet points with emojis."
+    )
+
+    clean_model = model_name.strip()
+    if clean_model.startswith("models/"):
+        clean_model = clean_model[7:]
+
+    if _GENAI_AVAILABLE:
+        try:
+            client = google_genai.Client(api_key=gemini_key)
+            response = client.models.generate_content(model=clean_model, contents=prompt)
+            return response.text.strip() if response.text else ""
+        except Exception:
+            pass
+
+    if _LANGCHAIN_GENAI_AVAILABLE:
+        try:
+            from langchain_google_genai import ChatGoogleGenerativeAI
+            llm = ChatGoogleGenerativeAI(
+                model=clean_model,
+                google_api_key=gemini_key,
+                temperature=0.2,
+                max_output_tokens=512,
+                max_retries=1,
+                request_timeout=20,
+            )
+            response = llm.invoke([HumanMessage(content=prompt)])
+            return response.content.strip()
+        except Exception:
+            pass
+
+    return ""
 
 # ---------------------------------------------------------------------------
 # Automatic Plotly Chart Recommendation
@@ -352,18 +575,38 @@ with st.sidebar:
     )
 
     st.markdown("---")
-    st.subheader("Gemini LLM Settings")
-    api_key_input = st.text_input(
-        "Gemini API Key",
-        value=GEMINI_API_KEY,
-        type="password",
-        help="Google AI Studio Gemini API Key.",
-    )
-    model_choice = st.selectbox(
-        "Gemini Model",
-        options=["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash-exp"],
+    st.subheader("LLM Provider Settings")
+    llm_provider = st.selectbox(
+        "LLM Provider",
+        options=["Ollama (Local)", "Google Gemini (Cloud)"],
         index=0,
     )
+
+    if llm_provider == "Ollama (Local)":
+        model_choice = st.text_input(
+            "Ollama Model Name",
+            value="llama3.2:3b",
+            help="Model installed in Ollama (e.g., llama3.2:3b, llama3.2:1b, llama3)",
+        )
+        ollama_url = st.text_input(
+            "Ollama Base URL",
+            value="http://localhost:11434",
+            help="Local Ollama instance URL",
+        )
+        api_key_input = "local_ollama"
+    else:
+        api_key_input = st.text_input(
+            "Gemini API Key",
+            value=GEMINI_API_KEY,
+            type="password",
+            help="Google AI Studio Gemini API Key.",
+        )
+        model_choice = st.selectbox(
+            "Gemini Model",
+            options=["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash"],
+            index=0,
+        )
+        ollama_url = ""
 
     st.markdown("---")
     st.subheader("Dataset Schema")
@@ -434,22 +677,35 @@ if active_query:
     # Validation check
     if not gcp_project:
         st.error("⚠️ Please specify your GCP Project ID in the sidebar or `.env` file to execute queries.")
-    elif not api_key_input:
+    elif llm_provider == "Google Gemini (Cloud)" and not api_key_input:
         st.error("⚠️ Please set your Gemini API Key in the sidebar or `GEMINI_API_KEY` in `.env`.")
     else:
         with st.chat_message("assistant"):
-            with st.spinner("🤖 Gemini is translating your question into BigQuery SQL..."):
-                sql_query, gen_err = generate_sql_with_gemini(
-                    user_query=active_query,
-                    project_id=gcp_project,
-                    dataset=bq_dataset,
-                    gemini_key=api_key_input,
-                    model_name=model_choice,
-                )
+            spinner_msg = f"🦙 Ollama ({model_choice}) is translating your question into BigQuery SQL..." if llm_provider == "Ollama (Local)" else "🤖 Gemini is translating your question into BigQuery SQL..."
+            with st.spinner(spinner_msg):
+                if llm_provider == "Ollama (Local)":
+                    sql_query, gen_err = generate_sql_with_ollama(
+                        user_query=active_query,
+                        project_id=gcp_project,
+                        dataset=bq_dataset,
+                        model_name=model_choice,
+                        ollama_url=ollama_url,
+                    )
+                else:
+                    sql_query, gen_err = generate_sql_with_gemini(
+                        user_query=active_query,
+                        project_id=gcp_project,
+                        dataset=bq_dataset,
+                        gemini_key=api_key_input,
+                        model_name=model_choice,
+                    )
 
             if gen_err:
                 st.error(gen_err)
             else:
+                # Auto-heal common small-LLM SQL slips
+                sql_query = fix_common_sql_mistakes(sql_query)
+
                 # Show generated SQL in an expander
                 with st.expander("🔍 View Generated BigQuery SQL", expanded=True):
                     st.code(sql_query, language="sql")
@@ -484,12 +740,20 @@ if active_query:
 
                             # AI Executive Summary / Insights
                             with st.spinner("✨ Generating AI Takeaways..."):
-                                insights = generate_insights_with_gemini(
-                                    active_query,
-                                    df,
-                                    gemini_key=api_key_input,
-                                    model_name=model_choice,
-                                )
+                                if llm_provider == "Ollama (Local)":
+                                    insights = generate_insights_with_ollama(
+                                        active_query,
+                                        df,
+                                        model_name=model_choice,
+                                        ollama_url=ollama_url,
+                                    )
+                                else:
+                                    insights = generate_insights_with_gemini(
+                                        active_query,
+                                        df,
+                                        gemini_key=api_key_input,
+                                        model_name=model_choice,
+                                    )
                                 if insights:
                                     st.markdown("#### 🧠 AI Insights")
                                     st.markdown(insights)

@@ -1,6 +1,9 @@
 # Environment & Secret Credentials
 .env
 service_account.json
+dbt_movies/service_account.json
+gen-lang-client*.json
+*service_account*.json
 *.key
 *.pem
 credentials.json
@@ -37,6 +40,7 @@ dbt_movies/target/
 dbt_movies/dbt_packages/
 dbt_movies/dbt_modules/
 dbt_movies/logs/
+dbt_movies/.user.yml
 
 # Airflow
 airflow/logs/

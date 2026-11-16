@@ -5,7 +5,7 @@ sources:
     description: >
       Raw data ingested via Airbyte and batch loaders into Google BigQuery.
       Contains the MovieLens dataset (movies, ratings) and TMDB Weekly Trending Movie API data.
-    database: "{{ env_var('BIGQUERY_PROJECT', 'your_gcp_project_id') }}"
+    database: "{{ env_var('BIGQUERY_PROJECT', 'gen-lang-client-0762203936') }}"
     schema: "{{ env_var('BIGQUERY_DATASET_RAW', 'raw_movies') }}"
     tables:
       - name: movies

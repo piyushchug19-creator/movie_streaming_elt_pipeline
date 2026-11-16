@@ -4,7 +4,7 @@ dbt_movies:
     dev:
       type: bigquery
       method: service-account
-      project: "{{ env_var('BIGQUERY_PROJECT', 'your_gcp_project_id') }}"
+      project: "{{ env_var('BIGQUERY_PROJECT', 'gen-lang-client-0762203936') }}"
       dataset: "{{ env_var('BIGQUERY_DATASET_ANALYTICS', 'analytics_movies') }}"
       threads: 4
       keyfile: "{{ env_var('GOOGLE_APPLICATION_CREDENTIALS', 'service_account.json') }}"
@@ -15,10 +15,10 @@ dbt_movies:
     prod:
       type: bigquery
       method: service-account
-      project: "{{ env_var('BIGQUERY_PROJECT') }}"
+      project: "{{ env_var('BIGQUERY_PROJECT', 'gen-lang-client-0762203936') }}"
       dataset: "{{ env_var('BIGQUERY_DATASET_ANALYTICS', 'analytics_movies') }}"
       threads: 8
-      keyfile: "{{ env_var('GOOGLE_APPLICATION_CREDENTIALS') }}"
+      keyfile: "{{ env_var('GOOGLE_APPLICATION_CREDENTIALS', 'service_account.json') }}"
       location: "{{ env_var('BIGQUERY_LOCATION', 'US') }}"
       timeout_seconds: 300
       priority: batch

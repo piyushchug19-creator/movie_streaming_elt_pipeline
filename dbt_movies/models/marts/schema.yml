@@ -8,56 +8,60 @@ models:
     columns:
       - name: movie_id
         description: Primary key for the movie in the catalog.
-        tests:
+        data_tests:
           - unique
           - not_null
 
       - name: title
         description: Full movie title as originally cataloged.
-        tests:
+        data_tests:
           - not_null
 
       - name: clean_title
         description: Normalized movie title stripped of release year suffix.
-        tests:
+        data_tests:
           - not_null
 
       - name: release_year
         description: Four-digit theatrical release year.
-        tests:
+        data_tests:
           - dbt_utils.accepted_range:
-              min_value: 1880
-              max_value: 2035
-              where: "release_year IS NOT NULL"
+              arguments:
+                min_value: 1880
+                max_value: 2035
+                where: "release_year IS NOT NULL"
 
       - name: primary_genre
         description: Primary lead genre extracted from the first element of genre_array.
-        tests:
+        data_tests:
           - not_null
 
       - name: rating_count
         description: Total number of user ratings submitted for this title.
-        tests:
+        data_tests:
           - not_null
           - dbt_utils.accepted_range:
-              min_value: 0
+              arguments:
+                min_value: 0
 
       - name: avg_rating
         description: Arithmetic mean of all user ratings (0.5 to 5.0 scale).
-        tests:
+        data_tests:
           - not_null
           - dbt_utils.accepted_range:
-              min_value: 0.0
-              max_value: 5.0
+              arguments:
+                min_value: 0.0
+                max_value: 5.0
 
       - name: bayesian_weighted_score
         description: >
           Bayesian weighted rating score dampening low-volume outliers toward the dataset prior.
-        tests:
+        data_tests:
           - not_null
           - dbt_utils.accepted_range:
-              min_value: 0.0
-              max_value: 5.0
+              arguments:
+                min_value: 0.0
+                max_value: 5.0
 
       - name: return_on_investment
         description: >
@@ -66,74 +70,79 @@ models:
 
       - name: financial_status
         description: Financial outcome categorization (Profitable, Loss, Break-Even, No Financial Data).
-        tests:
+        data_tests:
           - not_null
           - accepted_values:
-              values: ['Profitable', 'Loss', 'Break-Even', 'No Financial Data']
+              arguments:
+                values: ['Profitable', 'Loss', 'Break-Even', 'No Financial Data']
 
       - name: rating_tier
         description: Qualitative tier assignment based on rating performance.
-        tests:
+        data_tests:
           - not_null
           - accepted_values:
-              values:
-                - 'Masterpiece (>=4.5)'
-                - 'Acclaimed (4.0 - 4.49)'
-                - 'Favorable (3.5 - 3.99)'
-                - 'Mixed (2.5 - 3.49)'
-                - 'Unfavorable (<2.5)'
-                - 'Unrated'
+              arguments:
+                values:
+                  - 'Masterpiece (>=4.5)'
+                  - 'Acclaimed (4.0 - 4.49)'
+                  - 'Favorable (3.5 - 3.99)'
+                  - 'Mixed (2.5 - 3.49)'
+                  - 'Unfavorable (<2.5)'
+                  - 'Unrated'
 
   - name: mart_genre_trends
     description: >
       Aggregated mart tracking movie volume, user sentiment, and profitability
       across genres and release decades.
-    tests:
+    data_tests:
       - dbt_utils.unique_combination_of_columns:
-          combination_of_columns:
-            - genre
-            - decade
+          arguments:
+            combination_of_columns:
+              - genre
+              - decade
     columns:
       - name: genre
         description: Movie genre category (e.g., Action, Sci-Fi, Drama).
-        tests:
+        data_tests:
           - not_null
 
       - name: decade
         description: Release decade expressed as starting year (e.g., 1990, 2000, 2010).
-        tests:
+        data_tests:
           - not_null
 
       - name: decade_label
         description: Human-readable decade label (e.g., '1990s', '2000s').
-        tests:
+        data_tests:
           - not_null
 
       - name: total_movies
         description: Distinct count of movies belonging to this genre and decade.
-        tests:
+        data_tests:
           - not_null
           - dbt_utils.accepted_range:
-              min_value: 1
+              arguments:
+                min_value: 1
 
       - name: total_ratings
         description: Aggregate volume of ratings submitted for titles in this cohort.
-        tests:
+        data_tests:
           - not_null
 
       - name: avg_movie_rating
         description: Mean rating across all movies in this genre and decade cohort.
-        tests:
+        data_tests:
           - not_null
           - dbt_utils.accepted_range:
-              min_value: 0.0
-              max_value: 5.0
+              arguments:
+                min_value: 0.0
+                max_value: 5.0
 
       - name: avg_bayesian_score
         description: Mean Bayesian weighted score across movies in this cohort.
-        tests:
+        data_tests:
           - not_null
           - dbt_utils.accepted_range:
-              min_value: 0.0
-              max_value: 5.0
-
+              arguments:
+                min_value: 0.0
+                max_value: 5.0
