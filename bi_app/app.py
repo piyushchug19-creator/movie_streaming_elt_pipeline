@@ -237,33 +237,93 @@ def fix_common_sql_mistakes(sql: str) -> str:
     """Auto-corrects common small-LLM BigQuery SQL mistakes."""
     if not sql:
         return sql
-    
-    # 1. In mart_genre_trends: fix return_on_investment -> avg_return_on_investment
+
+    # ---- 0. Remove UNNEST() calls that cause syntax errors ----
+    # Small LLMs sometimes wrap column refs in UNNEST() which is invalid
+    # e.g. "SELECT UNNEST(genre_array) AS genre" -> "SELECT genre FROM ... CROSS JOIN UNNEST(genre_array) AS genre"
+    # Simple fix: remove bare UNNEST wrapping of columns in SELECT/WHERE (not in FROM/JOIN)
+    # Pattern: standalone "UNNEST(column_name)" not preceded by JOIN/FROM/,
+    if re.search(r"\bUNNEST\b", sql, re.IGNORECASE):
+        # If UNNEST is in a FROM/CROSS JOIN clause, it's valid — leave it
+        # If UNNEST is at the start of a SELECT expression or WHERE, strip it
+        # Strategy: replace "UNNEST(col) AS alias" with just "col" in SELECT
+        sql = re.sub(
+            r"\bUNNEST\s*\(\s*(\w+)\s*\)\s+AS\s+(\w+)",
+            r"\1",
+            sql,
+            flags=re.IGNORECASE,
+        )
+        # Remove any remaining bare "UNNEST(col)" that isn't in a JOIN context
+        # Only if there's no CROSS JOIN / JOIN before it on the same line
+        lines = sql.split("\n")
+        cleaned_lines = []
+        for line in lines:
+            stripped = line.strip().upper()
+            if "UNNEST" in stripped and not any(kw in stripped for kw in ["JOIN", "FROM"]):
+                line = re.sub(r"\bUNNEST\s*\(\s*(\w+)\s*\)", r"\1", line, flags=re.IGNORECASE)
+            cleaned_lines.append(line)
+        sql = "\n".join(cleaned_lines)
+
+    # ---- 1. In mart_genre_trends: fix column names and GROUP BY ----
     if "mart_genre_trends" in sql:
+        # Fix return_on_investment -> avg_return_on_investment
+        # First handle AVG(return_on_investment) which is a double-aggregation mistake
         sql = re.sub(r"\bAVG\s*\(\s*return_on_investment\s*\)", "avg_return_on_investment", sql, flags=re.IGNORECASE)
-        sql = re.sub(r"(?<!avg_)\breturn_on_investment\b", "avg_return_on_investment", sql, flags=re.IGNORECASE)
-        
-        # 2. Fix GROUP BY decade when decade_label is in SELECT
-        if "decade_label" in sql and "GROUP BY" in sql:
-            parts = sql.split("GROUP BY")
-            if len(parts) > 1 and "decade_label" not in parts[1]:
-                sql = re.sub(r"GROUP BY\s+decade\b", "GROUP BY decade, decade_label", sql, flags=re.IGNORECASE)
-            
-    # 3. In mart_movie_performance: expand primary_genre check to also check raw_genres
-    # MovieLens movies often have Action as primary and Sci-Fi as secondary
+        sql = re.sub(r"\bSUM\s*\(\s*return_on_investment\s*\)", "avg_return_on_investment", sql, flags=re.IGNORECASE)
+        # Then fix bare return_on_investment (not already prefixed with avg_)
+        sql = re.sub(r"(?<!\w)return_on_investment(?!\w)", "avg_return_on_investment", sql, flags=re.IGNORECASE)
+        # Clean up any accidental double-prefix: avg_avg_return_on_investment
+        sql = re.sub(r"\bavg_avg_return_on_investment\b", "avg_return_on_investment", sql, flags=re.IGNORECASE)
+
+        # Fix GROUP BY decade when decade_label is in SELECT but not in GROUP BY
+        if "decade_label" in sql.lower() and "GROUP BY" in sql.upper():
+            # Split on GROUP BY (case-insensitive)
+            group_match = re.search(r"(GROUP\s+BY\s+)(.*?)(?:\bORDER\b|\bHAVING\b|\bLIMIT\b|\bWINDOW\b|$)", sql, re.IGNORECASE | re.DOTALL)
+            if group_match:
+                group_clause = group_match.group(2)
+                if "decade_label" not in group_clause.lower() and "decade" in group_clause.lower():
+                    # Add decade_label after decade
+                    sql = re.sub(
+                        r"(GROUP\s+BY\s+)(.*?\bdecade\b)",
+                        r"\1\2, decade_label",
+                        sql,
+                        count=1,
+                        flags=re.IGNORECASE,
+                    )
+
+    # ---- 2. Expand Sci-Fi genre check to include raw_genres ----
     if "mart_movie_performance" in sql and "sci-fi" in sql.lower():
-        if "raw_genres" not in sql:
+        if "raw_genres" not in sql.lower():
+            # Case: LOWER(primary_genre) = 'sci-fi'
             sql = re.sub(
                 r"LOWER\s*\(\s*primary_genre\s*\)\s*=\s*'sci-fi'",
                 "(LOWER(primary_genre) = 'sci-fi' OR LOWER(raw_genres) LIKE '%sci-fi%')",
                 sql,
-                flags=re.IGNORECASE
+                flags=re.IGNORECASE,
             )
+            # Case: primary_genre = 'Sci-Fi' (without LOWER)
             sql = re.sub(
                 r"primary_genre\s*=\s*'Sci-Fi'",
                 "(primary_genre = 'Sci-Fi' OR raw_genres LIKE '%Sci-Fi%')",
-                sql
+                sql,
             )
+            # Case: primary_genre = 'sci-fi' (lowercase without LOWER function)
+            sql = re.sub(
+                r"primary_genre\s*=\s*'sci-fi'",
+                "(LOWER(primary_genre) = 'sci-fi' OR LOWER(raw_genres) LIKE '%sci-fi%')",
+                sql,
+                flags=re.IGNORECASE,
+            )
+
+    # ---- 3. Generic genre expansion for other genres ----
+    # Genres like 'Film-Noir', 'Children' are often secondary in MovieLens
+    if "mart_movie_performance" in sql and "raw_genres" not in sql.lower():
+        for genre in ["film-noir", "children", "fantasy", "mystery", "war", "western", "musical", "imax"]:
+            if genre in sql.lower():
+                pattern = rf"LOWER\s*\(\s*primary_genre\s*\)\s*=\s*'{genre}'"
+                replacement = f"(LOWER(primary_genre) = '{genre}' OR LOWER(raw_genres) LIKE '%{genre}%')"
+                sql = re.sub(pattern, replacement, sql, flags=re.IGNORECASE)
+
     return sql
 
 def execute_bigquery_query(client: bigquery.Client, query: str) -> Tuple[Optional[pd.DataFrame], float, Optional[str]]:
